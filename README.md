@@ -34,13 +34,12 @@ The preferred platform for easy distribution is Ubuntu Server 14.04 LTS.  This v
 
 5.Once the repo has been cloned, change into the directory of the repo and build the docker image using:
 
-    cd apollo
+    cd elections
     docker build -t apollo .
 
 6.Pull the docker images for mongodb and redis with the following command:
 
     docker pull library/mongo
-
     docker pull library/redis
 
 7.Create and run containers for redis and mongodb

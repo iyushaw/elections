@@ -1,0 +1,16 @@
+*.pyc
+*.sublime-project
+*.sublime-workspace
+.DS_Store
+.env*
+.Python
+.webassets-cache
+apollo-*.tar.gz
+assets/
+bin/
+include/
+lib/
+man/
+messages.mo
+share/
+src/

@@ -1,0 +1,5 @@
+The Elections tool can convincingly demonstrate the veracity of official election results. NDI’s election data management system aggregates and manages reports submitted by text or telephone from trained observers at polling stations across a country. By analyzing the data instantaneously, election experts can spot trends, flag potential problems, and maintain easy, direct communication with observers in the field. Sophisticated automated analysis and visualization tools empower civic groups to document for political leaders, public officials and fellow citizens whether an election was, in fact, free and fair.
+
+NDItech DemTools is funded under a grant by the National Endowment for Democracy.
+
+The Elections is Python Flask platform that is configured to run on Docker. The full user and administrator documentation can be found at https://www.nditech.org/demtools/elections

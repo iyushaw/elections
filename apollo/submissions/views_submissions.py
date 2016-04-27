@@ -8,17 +8,21 @@ from flask import (
 )
 from flask.ext.babel import lazy_gettext as _
 from flask.ext.security import current_user, login_required
+from flask.ext.security.utils import verify_and_update_password
 from flask.ext.menu import register_menu
+from flask_httpauth import HTTPBasicAuth
 from mongoengine import signals
 from tablib import Dataset
 from werkzeug.datastructures import MultiDict
 from apollo import services
 from apollo.submissions.incidents import incidents_csv
 from apollo.participants.utils import update_participant_completion_rating
+from apollo.submissions.aggregation import aggregated_dataframe
 from apollo.submissions.models import QUALITY_STATUSES
 from apollo.messaging.tasks import send_messages
 from apollo.frontend import route, permissions
 from apollo.frontend.filters import generate_submission_filter
+from apollo.frontend.filters import generate_quality_assurance_filter
 from apollo.frontend.forms import generate_submission_edit_form_class
 from apollo.frontend.helpers import (
     DictDiffer, displayable_location_types, get_event,
@@ -27,8 +31,20 @@ from apollo.frontend.template_filters import mkunixtimestamp
 from functools import partial
 from slugify import slugify_unicode
 
+
+auth = HTTPBasicAuth()
 bp = Blueprint('submissions', __name__, template_folder='templates',
                static_folder='static')
+
+
+@auth.verify_password
+def verify_pw(username, password):
+    user = services.users.get(email=username)
+
+    if not user:
+        return False
+
+    return verify_and_update_password(password, user)
 
 
 @route(bp, '/submissions/form/<form_id>', methods=['GET', 'POST'])
@@ -69,7 +85,7 @@ def submission_list(form_id):
 
     if request.args.get('export') and permissions.export_submissions.can():
         mode = request.args.get('export')
-        if mode == 'master':
+        if mode in ['master', 'aggregated']:
             queryset = services.submissions.find(
                 submission_type='M',
                 form=form
@@ -81,14 +97,20 @@ def submission_list(form_id):
             ).order_by('location', 'contributor')
 
         query_filterset = filter_class(queryset, request.args)
-        dataset = services.submissions.export_list(
-            query_filterset.qs, g.deployment)
         basename = slugify_unicode('%s %s %s %s' % (
             g.event.name.lower(),
             form.name.lower(),
             datetime.utcnow().strftime('%Y %m %d %H%M%S'),
             mode))
         content_disposition = 'attachment; filename=%s.csv' % basename
+        if mode == 'aggregated':
+            # TODO: you want to change the float format or even remove it
+            # if you have columns that have float values
+            dataset = aggregated_dataframe(query_filterset.qs, form)\
+                .to_csv(encoding='utf-8', index=False, float_format='%d')
+        else:
+            dataset = services.submissions.export_list(
+                query_filterset.qs, g.deployment)
 
         return Response(
             dataset, headers={'Content-Disposition': content_disposition},
@@ -324,7 +346,11 @@ def submission_edit(submission_id):
                                         submission.master, form_field,
                                         master_form.data.get(form_field))
 
-                                if form_field != "quarantine_status":
+                                if (
+                                    form_field not in
+                                    ["quarantine_status",
+                                     "verification_status"]
+                                ):
                                     submission.master.overridden_fields.append(
                                         form_field)
                                 changed = True
@@ -347,6 +373,17 @@ def submission_edit(submission_id):
                     ):
                         submission.quarantine_status = \
                             submission_form.data.get('quarantine_status')
+                        submission.save(clean=False)
+                        changed = True
+
+                    # update the verification status if it was set
+                    if (
+                        'verification_status' in submission_form.data.keys() and
+                        submission_form.data.get('verification_status') !=
+                        submission.verification_status
+                    ):
+                        submission.verification_status = \
+                            submission_form.data.get('verification_status')
                         submission.save(clean=False)
                         changed = True
 
@@ -519,8 +556,8 @@ def submission_version(submission_id, version_id):
     _('Quality Assurance'),
     order=3, icon='<i class="glyphicon glyphicon-ok"></i>',
     visible_when=lambda: len(get_quality_assurance_form_list_menu(
-        form_type='CHECKLIST', verifiable=True)) > 0
-    and permissions.view_result_analysis.can())
+        form_type='CHECKLIST', verifiable=True)) > 0 and
+    permissions.view_result_analysis.can())
 @register_menu(
     bp, 'main.qa.checklists', _('Quality Assurance'),
     dynamic_list_constructor=partial(
@@ -530,73 +567,56 @@ def submission_version(submission_id, version_id):
 def quality_assurance_list(form_id):
     form = services.forms.get_or_404(pk=form_id, form_type='CHECKLIST')
     page_title = _(u'Quality Assurance — %(name)s', name=form.name)
+    filter_class = generate_quality_assurance_filter(form)
+    data = request.args.to_dict()
+    data['form_id'] = unicode(form.pk)
+    page = int(data.pop('page', 1))
+    loc_types = displayable_location_types(is_administrative=True)
 
-    submissions = services.submissions.find(form=form, submission_type='M')
+    location = None
+    if request.args.get('location'):
+        location = services.locations.find(
+            pk=request.args.get('location')).first()
 
-    data_records = []
-    quality_check_statistics = {}
-    record_count = submissions.count()
+    if request.args.get('export') and permissions.export_submissions.can():
+        mode = request.args.get('export')
+        queryset = services.submissions.find(
+            submission_type='O',
+            form=form
+        ).order_by('location', 'contributor')
 
-    mapreduce_result = submissions.map_reduce('''
-        function () {
-            if (this.quality_checks) {
-                for (key in this.quality_checks) {
-                    emit(key + '|%(verified)s', 0);
-                    emit(key + '|%(ok)s', 0);
-                    emit(key + '|%(flagged)s', 0);
+        query_filterset = filter_class(queryset, request.args)
+        dataset = services.submissions.export_list(
+            query_filterset.qs, g.deployment)
+        basename = slugify_unicode('%s %s %s %s' % (
+            g.event.name.lower(),
+            form.name.lower(),
+            datetime.utcnow().strftime('%Y %m %d %H%M%S'),
+            mode))
+        content_disposition = 'attachment; filename=%s.csv' % basename
 
-                    value = this.quality_checks[key];
-                    emit(key + '|' + value, 1);
-                }
-            }
-        }
-        ''' % {'verified': QUALITY_STATUSES['VERIFIED'],
-               'ok': QUALITY_STATUSES['OK'],
-               'flagged': QUALITY_STATUSES['FLAGGED']},
-        'function (key, values) { return Array.sum(values); }',
-        'inline')
+        return Response(
+            dataset, headers={'Content-Disposition': content_disposition},
+            mimetype="text/csv"
+        )
 
-    for result in mapreduce_result:
-        (qc_name, qc_value) = result.key.split('|')
-        quality_check_statistics.setdefault(qc_name, {})
-        quality_check_statistics[qc_name][qc_value] = int(result.value)
-
-    for check in form.quality_checks:
-        record = {'description': check['description'], 'name': check['name']}
-
-        try:
-            record['verified'] = quality_check_statistics[check['name']][
-                str(QUALITY_STATUSES['VERIFIED'])
-            ]
-        except:
-            record['verified'] = 0
-        try:
-            record['ok'] = quality_check_statistics[check['name']][
-                str(QUALITY_STATUSES['OK'])
-            ]
-        except:
-            record['ok'] = 0
-        try:
-            record['flagged'] = quality_check_statistics[check['name']][
-                str(QUALITY_STATUSES['FLAGGED'])
-            ]
-        except:
-            record['flagged'] = 0
-
-        try:
-            record['missing'] = record_count - (
-                record['verified'] + record['ok'] + record['flagged']
-            )
-        except:
-            record['missing'] = 0
-
-        data_records.append(record)
+    submissions = services.submissions.find(form=form, submission_type='O')
+    query_filterset = filter_class(submissions, request.args)
+    filter_form = query_filterset.form
+    VERIFICATION_OPTIONS = services.submissions.__model__.VERIFICATION_OPTIONS
 
     context = {
         'form': form,
+        'args': data,
+        'filter_form': filter_form,
         'page_title': page_title,
-        'qa_records': data_records,
-        'quality_statuses': QUALITY_STATUSES
+        'location_types': loc_types,
+        'location': location,
+        'pager': query_filterset.qs.paginate(
+            page=page, per_page=current_app.config.get('PAGE_SIZE')),
+        'submissions': submissions,
+        'quality_statuses': QUALITY_STATUSES,
+        'verification_statuses': VERIFICATION_OPTIONS
     }
 
     template_name = 'frontend/quality_assurance_list.html'
@@ -638,3 +658,20 @@ def update_submission_version(sender, document, **kwargs):
         channel=channel,
         identity=identity
     )
+
+
+@route(bp, u'/api/v1/submissions/export/aggregated/<form_id>')
+@auth.login_required
+def submission_export(form_id):
+    form = services.forms.get_or_404(pk=form_id)
+
+    queryset = services.submissions.find(
+        form=form, submission_type='M').order_by('location')
+    dataset = aggregated_dataframe(queryset, form).to_csv(
+        encoding='utf-8', index=False, float_format='%d')
+
+    # TODO: any other way to control/stream the output?
+    # currently it just takes the name of the form ID
+    return Response(
+        dataset,
+        mimetype='text/csv')

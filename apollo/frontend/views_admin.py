@@ -1,6 +1,7 @@
 import base64
-from flask import request
+from flask import flash, request
 from flask.ext.admin import form
+from flask.ext.admin.actions import action
 from flask.ext.admin.contrib.mongoengine import ModelView
 from flask.ext.admin.contrib.mongoengine.form import CustomModelConverter
 from flask.ext.admin.form import rules
@@ -9,11 +10,24 @@ from flask.ext.babel import lazy_gettext as _
 from flask.ext.mongoengine.wtf import orm
 from flask.ext.security import current_user
 from flask.ext.security.utils import encrypt_password
+from jinja2 import contextfunction
 import magic
+import pytz
 from wtforms import FileField, PasswordField, SelectMultipleField
 from apollo.core import admin
-from apollo import models
+from apollo import models, settings
 from apollo.frontend import forms
+
+
+app_time_zone = pytz.timezone(settings.TIME_ZONE)
+utc_time_zone = pytz.utc
+
+DATETIME_FORMAT_SPEC = u'%Y-%m-%d %H:%M:%S %Z'
+
+try:
+    string_type = unicode
+except NameError:
+    string_type = str
 
 
 class DeploymentModelConverter(CustomModelConverter):
@@ -52,7 +66,8 @@ class DeploymentAdminView(BaseAdminView):
             }
         }
     }
-    form_excluded_columns = ['administrative_divisions_graph']
+    form_excluded_columns = ['administrative_divisions_graph',
+                             'is_initialized', 'include_rejected_in_votes']
     model_form_converter = DeploymentModelConverter
 
     def get_query(self):
@@ -97,15 +112,37 @@ class EventAdminView(BaseAdminView):
         rules.FieldSet(('name', 'start_date', 'end_date', 'roles'), _('Event'))
     ]
 
+    form_excluded_columns = (u'deployment')
+
     def get_one(self, pk):
         event = super(EventAdminView, self).get_one(pk)
+
+        # setup permissions list
         try:
             entities = models.Need.objects.get(
                 action='access_event', items=event).entities
         except models.Need.DoesNotExist:
             entities = []
         event.roles = [unicode(i.pk) for i in entities]
+
+        # convert start and end dates to app time zone
+        event.start_date = utc_time_zone.localize(event.start_date).astimezone(
+            app_time_zone)
+        event.end_date = utc_time_zone.localize(event.end_date).astimezone(
+            app_time_zone)
         return event
+
+    @contextfunction
+    def get_list_value(self, context, model, name):
+        if name in ['start_date', 'end_date']:
+            original = getattr(model, name, None)
+            if original:
+                return utc_time_zone.localize(original).astimezone(
+                    app_time_zone).strftime(DATETIME_FORMAT_SPEC)
+
+            return original
+
+        return super(EventAdminView, self).get_list_value(context, model, name)
 
     def get_query(self):
         '''Returns the queryset of the objects to list.'''
@@ -117,6 +154,12 @@ class EventAdminView(BaseAdminView):
         # deployment, since it won't appear in the form
         if is_created:
             model.deployment = current_user.deployment
+
+        # also, convert the time zone to UTC
+        model.start_date = app_time_zone.localize(model.start_date).astimezone(
+            utc_time_zone)
+        model.end_date = app_time_zone.localize(model.end_date).astimezone(
+            utc_time_zone)
 
     def after_model_change(self, form, model, is_created):
         # remove event permission
@@ -145,8 +188,12 @@ class UserAdminView(BaseAdminView):
     '''Thanks to mrjoes and this Flask-Admin issue:
     https://github.com/mrjoes/flask-admin/issues/173
     '''
-    column_list = ('email', 'roles')
-    form_excluded_columns = ('password',)
+    column_list = ('email', 'roles', 'active')
+    column_searchable_list = ('email',)
+    form_excluded_columns = ('password', 'confirmed_at', 'login_count',
+                             'last_login_ip', 'last_login_at',
+                             'current_login_at', 'deployment',
+                             'current_login_ip')
     form_rules = [
         rules.FieldSet(('email', 'password2', 'active', 'roles'))
     ]
@@ -165,6 +212,16 @@ class UserAdminView(BaseAdminView):
         form_class = super(UserAdminView, self).scaffold_form()
         form_class.password2 = PasswordField(_('New password'))
         return form_class
+
+    @action('disable', _('Disable'), _('Are you sure you want to disable selected users?'))
+    def action_disable(self, ids):
+        models.User.objects(pk__in=ids).update(set__active=False)
+        flash(string_type(_('User(s) successfully disabled.')))
+
+    @action('enable', _('Enable'), _('Are you sure you want to enable selected users?'))
+    def action_enable(self, ids):
+        models.User.objects(pk__in=ids).update(set__active=True)
+        flash(string_type(_('User(s) successfully enabled.')))
 
 
 class RoleAdminView(BaseAdminView):

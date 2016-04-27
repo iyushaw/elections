@@ -342,6 +342,16 @@ def generate_submission_edit_form_class(form):
             validators=[validators.optional()]
             )
 
+    if (
+        form.form_type == 'CHECKLIST' and
+        permissions.edit_submission_verification_status.can()
+    ):
+        form_fields['verification_status'] = SelectField(
+            choices=Submission.VERIFICATION_STATUSES,
+            filters=[lambda data: data if data else ''],
+            validators=[validators.optional()]
+            )
+
     if form.form_type == 'INCIDENT':
         form_fields['status'] = SelectField(
             choices=STATUS_CHOICES,
@@ -381,22 +391,27 @@ class DummyForm(WTSecureForm):
     select_superset = StringField(widget=widgets.HiddenInput())
 
 
-class ChecklistInitForm(WTSecureForm):
-    form = SelectField(
-        _('Form'),
-        choices=_make_choices(
-            forms.find(form_type='CHECKLIST').scalar('id', 'name'),
-            _('Select form')),
-        validators=[validators.input_required()])
-    role = SelectField(
-        _('Role'),
-        choices=_make_choices(
-            participant_roles.find().scalar('id', 'name'),
-            _('Select role')),
-        validators=[validators.input_required()])
-    location_type = SelectField(
-        _('Location type'),
-        choices=_make_choices(
-            location_types.find().scalar('id', 'name'),
-            _('Select location type')),
-        validators=[validators.input_required()])
+def make_checklist_init_form():
+    class ChecklistInitForm(WTSecureForm):
+        form = SelectField(
+            _('Form'),
+            choices=_make_choices(
+                forms.find(
+                    events=g.event, form_type='CHECKLIST').scalar(
+                        'id', 'name'),
+                _('Select form')),
+            validators=[validators.input_required()])
+        role = SelectField(
+            _('Role'),
+            choices=_make_choices(
+                participant_roles.find().scalar('id', 'name'),
+                _('Select role')),
+            validators=[validators.input_required()])
+        location_type = SelectField(
+            _('Location type'),
+            choices=_make_choices(
+                location_types.find().scalar('id', 'name'),
+                _('Select location type')),
+            validators=[validators.input_required()])
+
+    return ChecklistInitForm()

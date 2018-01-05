@@ -5,7 +5,7 @@ The Elections tool can convincingly demonstrate the veracity of official electio
 
 NDItech DemTools is funded under a grant by the National Endowment for Democracy.
 
-The Elections is Python Flask platform that is configured to run on Docker. The full user and administrator documentation can be found at https://www.nditech.org/demtools/elections
+The Elections is Python Flask platform that is configured to run on Docker. The full user and administrator documentation can be found at https://www.dem.tools/elections
 
 ## License
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version. This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more details. See <http://www.gnu.org/licenses/>.
